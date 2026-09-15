@@ -1,8 +1,8 @@
 # msgpack-numpy-rs
 
-![Crates.io](https://img.shields.io/crates/v/msgpack-numpy)
-![Docs.rs](https://docs.rs/msgpack-numpy/badge.svg)
-![License](https://img.shields.io/crates/l/msgpack-numpy)
+[![Crates.io](https://img.shields.io/crates/v/msgpack-numpy)](https://crates.io/crates/msgpack-numpy)
+[![Docs.rs](https://docs.rs/msgpack-numpy/badge.svg)](https://docs.rs/msgpack-numpy)
+[![License](https://img.shields.io/crates/l/msgpack-numpy)](#license)
 
 This crate does what Python's [msgpack-numpy](https://github.com/lebedov/msgpack-numpy/) does in Rust, and a lot [faster](#benchmarks). It serializes and deserializes NumPy scalars and arrays to and from the [MessagePack](https://msgpack.org/) format, in the same serialized formats as the Python counterpart, so they could interoperate with each other. It enables processing NumPy arrays in a different service in Rust through IPC, or saving Machine Learning results to disk (better paired with compression).
 
