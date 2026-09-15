@@ -19,7 +19,9 @@ def setup():
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # Run the Rust binary to generate test data
-    result = subprocess.run(["cargo", "run", "--bin", "test_helpers_serialize"])
+    result = subprocess.run(
+        ["cargo", "run", "--locked", "--example", "test_helpers_serialize"]
+    )
     if result.returncode != 0:
         pytest.fail(f"Failed to setup: {result.stderr}")
 
@@ -76,6 +78,10 @@ def test_scalar_deserialization(filename, expected_value):
     # Multidimensional arrays
     ("ndarray_2d_int32.msgpack", np.array([[1, 2], [3, 4], [5, 6]], dtype=np.int32)),
     ("ndarray_2d_float32.msgpack", np.array([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], dtype=np.float32)),
+
+    # Non-standard Rust layouts must serialize in logical row-major order
+    ("ndarray_transposed_i32.msgpack", np.array([[1, 4], [2, 5], [3, 6]], dtype=np.int32)),
+    ("ndarray_reversed_i32.msgpack", np.array([4, 3, 2, 1], dtype=np.int32)),
 
     # others
     ("ndarray_large_i32s.msgpack", np.arange(1000000, dtype=np.int32)),

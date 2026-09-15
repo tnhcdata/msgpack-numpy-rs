@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 python3 -m venv tests/venv
 source tests/venv/bin/activate
-pip install uv
+python -m pip install uv
 uv pip install msgpack-numpy pytest

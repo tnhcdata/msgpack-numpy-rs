@@ -18,7 +18,7 @@ fn read_file(filepath: &str) -> Vec<u8> {
 }
 
 fn deserialize<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> T {
-    rmp_serde::from_slice(&buf).unwrap()
+    rmp_serde::from_slice(buf).unwrap()
 }
 
 fn main() {
@@ -44,8 +44,7 @@ fn main() {
         let filepath = "tests/data/example_float16_array.msgpack";
         let arr = Array::from_vec(vec![0.1, 0.2, 0.3, 0.4, 0.5])
             .into_dyn()
-            .mapv(f16::from_f32)
-            .into();
+            .mapv(f16::from_f32);
         serialize(&NDArray::F16(arr), filepath);
         let serialized = read_file(filepath);
         let deserialized: NDArray = deserialize(&serialized);

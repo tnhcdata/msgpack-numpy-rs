@@ -12,12 +12,24 @@ env:
 jobs:
   build_and_test:
 
+    strategy:
+      matrix:
+        ndarray: ["0.15.6", "0.16.1", "0.17.2"]
+
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+    - name: Select ndarray version
+      run: cargo update --package ndarray --precise "${{ matrix.ndarray }}"
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
+    - name: Clippy
+      run: cargo clippy --locked --all-targets -- -D warnings
     - name: Set up Python venv for tests
       run: bash tests/setup-python-venv.sh
     - name: Run tests

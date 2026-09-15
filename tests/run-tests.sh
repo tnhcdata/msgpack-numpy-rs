@@ -1,10 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-echo "Performing unit tests..."
-cargo test --lib
+set -euo pipefail
 
-echo "Testing deserializing in Rust msgpacks created in Python..."
-cargo test --test test_deserialize
+echo "Running Rust tests..."
+cargo test --locked
+
+echo "Compiling Rust benchmark..."
+cargo bench --locked --bench bench_serialize_and_deserialize --no-run
 
 echo "Testing deserializing in Python msgpacks created in Rust..."
 source tests/venv/bin/activate

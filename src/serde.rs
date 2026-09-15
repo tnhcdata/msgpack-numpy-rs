@@ -7,6 +7,11 @@ use serde_bytes::{ByteBuf, Bytes};
 use std::borrow::Cow;
 use std::fmt;
 
+// NumPy dtypes emitted by this crate are explicitly little-endian. The zero-copy
+// byte casts below are therefore valid only when native byte order is little-endian.
+#[cfg(not(target_endian = "little"))]
+compile_error!("msgpack-numpy currently supports only little-endian targets");
+
 // DType
 
 enum DType {
@@ -303,7 +308,7 @@ impl<'de> Deserialize<'de> for NDArray {
                             return Err(de::Error::unknown_field(
                                 key,
                                 &["nd", "type", "kind", "shape", "data"],
-                            ))
+                            ));
                         }
                     }
                 }
@@ -335,34 +340,34 @@ impl<'de> Deserialize<'de> for NDArray {
                             "|u1" => Array::from_shape_vec(shape, data.into_vec())
                                 .map(NDArray::U8)
                                 .map_err(de::Error::custom),
-                            "|i1" => create_ndarray_from_transmution::<i8>(data.into_vec(), shape)
+                            "|i1" => create_ndarray_from_bytes::<i8>(data.into_vec(), shape)
                                 .map(NDArray::I8)
                                 .map_err(de::Error::custom),
-                            "<u2" => create_ndarray_from_transmution::<u16>(data.into_vec(), shape)
+                            "<u2" => create_ndarray_from_bytes::<u16>(data.into_vec(), shape)
                                 .map(NDArray::U16)
                                 .map_err(de::Error::custom),
-                            "<i2" => create_ndarray_from_transmution::<i16>(data.into_vec(), shape)
+                            "<i2" => create_ndarray_from_bytes::<i16>(data.into_vec(), shape)
                                 .map(NDArray::I16)
                                 .map_err(de::Error::custom),
-                            "<f2" => create_ndarray_from_transmution::<f16>(data.into_vec(), shape)
+                            "<f2" => create_ndarray_from_bytes::<f16>(data.into_vec(), shape)
                                 .map(NDArray::F16)
                                 .map_err(de::Error::custom),
-                            "<u4" => create_ndarray_from_transmution::<u32>(data.into_vec(), shape)
+                            "<u4" => create_ndarray_from_bytes::<u32>(data.into_vec(), shape)
                                 .map(NDArray::U32)
                                 .map_err(de::Error::custom),
-                            "<i4" => create_ndarray_from_transmution::<i32>(data.into_vec(), shape)
+                            "<i4" => create_ndarray_from_bytes::<i32>(data.into_vec(), shape)
                                 .map(NDArray::I32)
                                 .map_err(de::Error::custom),
-                            "<f4" => create_ndarray_from_transmution::<f32>(data.into_vec(), shape)
+                            "<f4" => create_ndarray_from_bytes::<f32>(data.into_vec(), shape)
                                 .map(NDArray::F32)
                                 .map_err(de::Error::custom),
-                            "<u8" => create_ndarray_from_transmution::<u64>(data.into_vec(), shape)
+                            "<u8" => create_ndarray_from_bytes::<u64>(data.into_vec(), shape)
                                 .map(NDArray::U64)
                                 .map_err(de::Error::custom),
-                            "<i8" => create_ndarray_from_transmution::<i64>(data.into_vec(), shape)
+                            "<i8" => create_ndarray_from_bytes::<i64>(data.into_vec(), shape)
                                 .map(NDArray::I64)
                                 .map_err(de::Error::custom),
-                            "<f8" => create_ndarray_from_transmution::<f64>(data.into_vec(), shape)
+                            "<f8" => create_ndarray_from_bytes::<f64>(data.into_vec(), shape)
                                 .map(NDArray::F64)
                                 .map_err(de::Error::custom),
                             _ => Ok(NDArray::Unsupported),
@@ -377,15 +382,15 @@ impl<'de> Deserialize<'de> for NDArray {
     }
 }
 
-/// Creates an n-dimensional array from raw byte data by transmuting it to the specified type.
+/// Creates an n-dimensional array from little-endian byte data.
 ///
 /// # Type Parameters
 ///
-/// * `T`: The target numeric type for transmutation (e.g., f32, i64).
+/// * `T`: The target numeric type (e.g., f32, i64).
 ///
 /// # Arguments
 ///
-/// * `data`: Raw bytes to be transmuted and reshaped.
+/// * `data`: Raw bytes to be decoded and reshaped.
 /// * `shape`: The desired shape of the output array.
 ///
 /// # Returns
@@ -395,65 +400,40 @@ impl<'de> Deserialize<'de> for NDArray {
 /// # Errors
 ///
 /// Returns an error if:
-/// * Transmutation fails (e.g., data length isn't a multiple of `size_of::<T>()`).
-/// * Specified shape doesn't match the transmuted data length.
-///
-/// # Safety
-///
-/// Caller must ensure:
-/// * Input data represents valid values of type `T`.
-/// * Data length is a multiple of `size_of::<T>()`.
-/// * Memory layout of `T` is compatible with the original data.
-fn create_ndarray_from_transmution<T>(
+/// * Data length isn't a multiple of `size_of::<T>()`.
+/// * Specified shape doesn't match the decoded data length.
+fn create_ndarray_from_bytes<T: bytemuck::Pod>(
     data: Vec<u8>,
     shape: IxDyn,
 ) -> Result<Array<T, IxDyn>, NDArrayError> {
-    let transmuted = unsafe { transmute_vec(data) }.ok_or_else(|| {
-        NDArrayError::InvalidDataLength(format!(
-            "Invalid data length for {} transmutation",
-            std::any::type_name::<T>()
-        ))
-    })?;
+    let values = match bytemuck::allocation::try_cast_vec(data) {
+        // This zero-copy takeover is possible only when u8 and T have exactly
+        // the same allocation layout (for the supported types, T = i8).
+        Ok(values) => values,
+        Err((_, data)) => bytes_to_vec(&data).ok_or_else(|| {
+            NDArrayError::InvalidDataLength(format!(
+                "Invalid data length for {} decoding",
+                std::any::type_name::<T>()
+            ))
+        })?,
+    };
 
-    Array::from_shape_vec(shape, transmuted).map_err(|e| NDArrayError::ArrayShapeError(e))
+    Array::from_shape_vec(shape, values).map_err(NDArrayError::ArrayShapeError)
 }
 
-/// Transmutes a `Vec<u8>` into a `Vec<T>`.
-///
-/// We could use vec_into_raw_parts when that stabilizes.
-/// e.g. let (ptr, len, cap) = data.into_raw_parts();
-///
-/// # Safety
-///
-/// This function is unsafe because it assumes that:
-/// - The input `data` is correctly formatted and aligned for type `T`.
-///
-/// # Type Parameters
-///
-/// * `T`: The target numeric type for transmutation (e.g., f32, i64).
-///
-/// # Arguments
-///
-/// * `data` - A `Vec<u8>` containing the raw byte data.
-///
-/// # Returns
-///
-/// Returns `Some(Vec<T>)` containing the transmuted data if successful,
-/// or `None` if the input length is not a multiple of `size_of::<T>()`.
-unsafe fn transmute_vec<T>(mut data: Vec<u8>) -> Option<Vec<T>> {
+fn bytes_to_vec<T: bytemuck::Pod>(data: &[u8]) -> Option<Vec<T>> {
     let size_of_t = mem::size_of::<T>();
-    if data.len() % size_of_t != 0 {
+    if size_of_t == 0 {
+        return None;
+    }
+    let chunks = data.chunks_exact(size_of_t);
+    if !chunks.remainder().is_empty() {
         return None;
     }
 
-    let ptr = data.as_mut_ptr() as *mut T;
-    let len = data.len() / size_of_t;
-    let capacity = data.capacity() / size_of_t;
-
-    // Ensure we don't drop the original vector's memory
-    mem::forget(data);
-
-    Some(Vec::from_raw_parts(ptr, len, capacity))
+    // The crate has a compile-time little-endian guard, so native Pod reads
+    // match the explicitly little-endian NumPy dtypes.
+    Some(chunks.map(bytemuck::pod_read_unaligned).collect())
 }
 
 // impl Serialize
@@ -497,41 +477,33 @@ fn serialize_ndarray<S, A, T>(
 ) -> Result<(), S::Error>
 where
     S: SerializeMap,
-    A: ndarray::RawData<Elem = T>,
+    A: ndarray::Data<Elem = T>,
+    T: bytemuck::Pod,
 {
     state.serialize_entry(Bytes::new(b"type"), type_str)?;
     state.serialize_entry(Bytes::new(b"kind"), Bytes::new(b""))?;
     state.serialize_entry(Bytes::new(b"shape"), &arr.shape())?;
 
-    let data = unsafe { transmute_array_to_slice(arr) };
-    state.serialize_entry(Bytes::new(b"data"), Bytes::new(data))
+    let data = ndarray_to_bytes(arr);
+    state.serialize_entry(Bytes::new(b"data"), Bytes::new(&data))
 }
 
-/// Converts an n-dimensional array to a byte slice without copying.
-///
-/// # Safety
-///
-/// This function is unsafe because:
-/// - It assumes the memory layout of the array buffer is contiguous with no padding.
-///
-/// # Type Parameters
-///
-/// * `A`: ndarray::RawData, having an associate type `T`.
-/// * `T`: The target numeric type for transmutation (e.g., f32, i64).
-///
-/// # Arguments
-///
-/// * `arr` - A reference to an n-dimensional array of type `T`.
-///
-/// # Returns
-///
-/// A byte slice (`&[u8]`) representing the raw memory of the input array.
-unsafe fn transmute_array_to_slice<A: ndarray::RawData<Elem = T>, T>(
+/// Returns borrowed bytes for standard-layout arrays and copies arrays with
+/// non-standard strides into logical (row-major) order.
+fn ndarray_to_bytes<A: ndarray::Data<Elem = T>, T: bytemuck::Pod>(
     arr: &ArrayBase<A, IxDyn>,
-) -> &[u8] {
-    let ptr = arr.as_ptr() as *const u8;
-    let len = arr.len() * mem::size_of::<T>();
-    std::slice::from_raw_parts(ptr, len)
+) -> Cow<'_, [u8]> {
+    if let Some(slice) = arr.as_slice() {
+        // The crate has a compile-time little-endian guard, and Pod excludes
+        // padding and invalid bit patterns.
+        return Cow::Borrowed(bytemuck::cast_slice(slice));
+    }
+
+    let mut data = Vec::with_capacity(arr.len() * mem::size_of::<T>());
+    for value in arr.iter() {
+        data.extend_from_slice(bytemuck::bytes_of(value));
+    }
+    Cow::Owned(data)
 }
 
 /***********************************************************************************************/
@@ -576,7 +548,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for CowNDArray<'a> {
                             return Err(de::Error::unknown_field(
                                 key,
                                 &["nd", "type", "kind", "shape", "data"],
-                            ))
+                            ));
                         }
                     }
                 }
@@ -610,34 +582,34 @@ impl<'de: 'a, 'a> Deserialize<'de> for CowNDArray<'a> {
                                 .map(CowArray::from)
                                 .map(CowNDArray::U8)
                                 .map_err(de::Error::custom),
-                            "|i1" => create_cowndarray_from_transmution::<i8>(data, shape)
+                            "|i1" => create_cowndarray_from_bytes::<i8>(data, shape)
                                 .map(CowNDArray::I8)
                                 .map_err(de::Error::custom),
-                            "<u2" => create_cowndarray_from_transmution::<u16>(data, shape)
+                            "<u2" => create_cowndarray_from_bytes::<u16>(data, shape)
                                 .map(CowNDArray::U16)
                                 .map_err(de::Error::custom),
-                            "<i2" => create_cowndarray_from_transmution::<i16>(data, shape)
+                            "<i2" => create_cowndarray_from_bytes::<i16>(data, shape)
                                 .map(CowNDArray::I16)
                                 .map_err(de::Error::custom),
-                            "<f2" => create_cowndarray_from_transmution::<f16>(data, shape)
+                            "<f2" => create_cowndarray_from_bytes::<f16>(data, shape)
                                 .map(CowNDArray::F16)
                                 .map_err(de::Error::custom),
-                            "<u4" => create_cowndarray_from_transmution::<u32>(data, shape)
+                            "<u4" => create_cowndarray_from_bytes::<u32>(data, shape)
                                 .map(CowNDArray::U32)
                                 .map_err(de::Error::custom),
-                            "<i4" => create_cowndarray_from_transmution::<i32>(data, shape)
+                            "<i4" => create_cowndarray_from_bytes::<i32>(data, shape)
                                 .map(CowNDArray::I32)
                                 .map_err(de::Error::custom),
-                            "<f4" => create_cowndarray_from_transmution::<f32>(data, shape)
+                            "<f4" => create_cowndarray_from_bytes::<f32>(data, shape)
                                 .map(CowNDArray::F32)
                                 .map_err(de::Error::custom),
-                            "<u8" => create_cowndarray_from_transmution::<u64>(data, shape)
+                            "<u8" => create_cowndarray_from_bytes::<u64>(data, shape)
                                 .map(CowNDArray::U64)
                                 .map_err(de::Error::custom),
-                            "<i8" => create_cowndarray_from_transmution::<i64>(data, shape)
+                            "<i8" => create_cowndarray_from_bytes::<i64>(data, shape)
                                 .map(CowNDArray::I64)
                                 .map_err(de::Error::custom),
-                            "<f8" => create_cowndarray_from_transmution::<f64>(data, shape)
+                            "<f8" => create_cowndarray_from_bytes::<f64>(data, shape)
                                 .map(CowNDArray::F64)
                                 .map_err(de::Error::custom),
                             _ => Ok(CowNDArray::Unsupported),
@@ -652,51 +624,35 @@ impl<'de: 'a, 'a> Deserialize<'de> for CowNDArray<'a> {
     }
 }
 
-fn create_cowndarray_from_transmution<T: Clone>(
-    data: &[u8],
+fn create_cowndarray_from_bytes<'a, T: bytemuck::Pod>(
+    data: &'a [u8],
     shape: IxDyn,
-) -> Result<CowArray<T, IxDyn>, NDArrayError> {
-    let transmuted = unsafe { transmute_slice(data) }.ok_or_else(|| {
+) -> Result<CowArray<'a, T, IxDyn>, NDArrayError> {
+    let values = bytes_to_cow(data).ok_or_else(|| {
         NDArrayError::InvalidDataLength(format!(
-            "Invalid data length for {} transmutation",
+            "Invalid data length for {} decoding",
             std::any::type_name::<T>()
         ))
     })?;
 
-    match transmuted {
+    match values {
         Cow::Borrowed(slice) => ArrayView::from_shape(shape, slice).map(CowArray::from),
         Cow::Owned(vec) => Array::from_shape_vec(shape, vec).map(CowArray::from),
     }
-    .map_err(|e| NDArrayError::ArrayShapeError(e))
+    .map_err(NDArrayError::ArrayShapeError)
 }
 
-unsafe fn transmute_slice<T: Clone>(data: &[u8]) -> Option<Cow<[T]>> {
+fn bytes_to_cow<T: bytemuck::Pod>(data: &[u8]) -> Option<Cow<'_, [T]>> {
     let size_of_t = mem::size_of::<T>();
-    // Ensure the data length is a multiple of T's size
-    if data.len() % size_of_t != 0 {
+    if size_of_t == 0 || !data.chunks_exact(size_of_t).remainder().is_empty() {
         return None;
     }
 
-    // Calculate the misalignment
-    let misalignment = (data.as_ptr() as usize) % mem::align_of::<T>();
-
-    if misalignment == 0 {
-        // println!("Data is already aligned");
-        // The data is already aligned, we can transmute directly
-        let ptr = data.as_ptr() as *const T;
-        let len = data.len() / size_of_t;
-        Some(Cow::Borrowed(std::slice::from_raw_parts(ptr, len)))
-    } else {
-        // println!("Data is not aligned");
-        // The data is not aligned, we need to copy it to an aligned buffer
-        let mut aligned_vec: Vec<T> = Vec::with_capacity(data.len() / size_of_t);
-        std::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            aligned_vec.as_mut_ptr() as *mut u8,
-            data.len(),
-        );
-        aligned_vec.set_len(data.len() / size_of_t);
-        Some(Cow::Owned(aligned_vec))
+    // Borrow when the MessagePack payload happens to have T's alignment.
+    // Otherwise allocate correctly aligned storage and perform unaligned reads.
+    match bytemuck::try_cast_slice(data) {
+        Ok(slice) => Some(Cow::Borrowed(slice)),
+        Err(_) => bytes_to_vec(data).map(Cow::Owned),
     }
 }
 
@@ -739,10 +695,10 @@ impl<'a> Serialize for CowNDArray<'a> {
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
+    use super::{NDArrayError, create_cowndarray_from_bytes, create_ndarray_from_bytes};
     use crate::core::{CowNDArray, NDArray, Scalar};
     use half::f16;
-    use ndarray::Array;
+    use ndarray::{Array, IxDyn, arr2, s};
 
     #[test]
     fn test_scalar_serialization() {
@@ -772,18 +728,18 @@ mod tests {
     #[rustfmt::skip]
     fn test_ndarray_serialization() {
         let cases = vec![
-            NDArray::Bool(Array::from_vec(vec![true, false]).into_dyn().into()),
-            NDArray::U8(Array::from_vec(vec![1, 2, 3]).into_dyn().into()),
-            NDArray::I8(Array::from_vec(vec![-1, 0, 1]).into_dyn().into()),
-            NDArray::U16(Array::from_vec(vec![1, 2, 3]).into_dyn().into()),
-            NDArray::I16(Array::from_vec(vec![-1, 0, 1]).into_dyn().into()),
-            NDArray::F16(Array::from_vec(vec![1.0, 2.0]).into_dyn().mapv(f16::from_f32).into()),
-            NDArray::U32(Array::from_vec(vec![1, 2, 3]).into_dyn().into()),
-            NDArray::I32(Array::from_vec(vec![-1, 0, 1]).into_dyn().into()),
-            NDArray::F32(Array::from_vec(vec![1.0, 2.0, 3.0]).into_dyn().into()),
-            NDArray::U64(Array::from_vec(vec![1, 2]).into_dyn().into()),
-            NDArray::I64(Array::from_vec(vec![-1, 0, 1]).into_dyn().into()),
-            NDArray::F64(Array::from_vec(vec![1.0, 2.0]).into_dyn().into()),
+            NDArray::Bool(Array::from_vec(vec![true, false]).into_dyn()),
+            NDArray::U8(Array::from_vec(vec![1, 2, 3]).into_dyn()),
+            NDArray::I8(Array::from_vec(vec![-1, 0, 1]).into_dyn()),
+            NDArray::U16(Array::from_vec(vec![1, 2, 3]).into_dyn()),
+            NDArray::I16(Array::from_vec(vec![-1, 0, 1]).into_dyn()),
+            NDArray::F16(Array::from_vec(vec![1.0, 2.0]).into_dyn().mapv(f16::from_f32)),
+            NDArray::U32(Array::from_vec(vec![1, 2, 3]).into_dyn()),
+            NDArray::I32(Array::from_vec(vec![-1, 0, 1]).into_dyn()),
+            NDArray::F32(Array::from_vec(vec![1.0, 2.0, 3.0]).into_dyn()),
+            NDArray::U64(Array::from_vec(vec![1, 2]).into_dyn()),
+            NDArray::I64(Array::from_vec(vec![-1, 0, 1]).into_dyn()),
+            NDArray::F64(Array::from_vec(vec![1.0, 2.0]).into_dyn()),
         ];
 
         for ndarray in cases {
@@ -792,6 +748,64 @@ mod tests {
 
             assert_eq!(deserialized, ndarray);
         }
+    }
+
+    #[test]
+    fn test_non_standard_layout_serialization() {
+        let transposed = arr2(&[[1_i32, 2, 3], [4, 5, 6]]).reversed_axes().into_dyn();
+        assert!(!transposed.is_standard_layout());
+
+        let reversed = Array::from_vec(vec![1_i32, 2, 3, 4])
+            .slice_move(s![..;-1])
+            .into_dyn();
+        assert!(!reversed.is_standard_layout());
+
+        for expected in [transposed, reversed] {
+            let serialized = rmp_serde::to_vec_named(&NDArray::I32(expected.clone())).unwrap();
+            let deserialized: NDArray = rmp_serde::from_slice(&serialized).unwrap();
+            assert_eq!(deserialized, NDArray::I32(expected));
+        }
+    }
+
+    #[test]
+    fn test_i8_deserialization_reuses_byte_allocation() {
+        let bytes = vec![0_u8, 127, 128, 255];
+        let bytes_ptr = bytes.as_ptr();
+        let array = create_ndarray_from_bytes::<i8>(bytes, IxDyn(&[4])).unwrap();
+
+        assert_eq!(array.as_ptr().cast::<u8>(), bytes_ptr);
+        assert_eq!(array.as_slice().unwrap(), &[0, 127, -128, -1]);
+    }
+
+    #[test]
+    fn test_malformed_byte_lengths_are_rejected() {
+        assert!(matches!(
+            create_ndarray_from_bytes::<u32>(vec![0; 3], IxDyn(&[1])),
+            Err(NDArrayError::InvalidDataLength(_))
+        ));
+        assert!(matches!(
+            create_cowndarray_from_bytes::<u32>(&[0; 3], IxDyn(&[1])),
+            Err(NDArrayError::InvalidDataLength(_))
+        ));
+    }
+
+    #[test]
+    fn test_cow_deserialization_borrows_aligned_data_and_copies_misaligned_data() {
+        let aligned_values = [1_u32, 2];
+        let aligned_bytes = bytemuck::cast_slice(&aligned_values);
+        let borrowed = create_cowndarray_from_bytes::<u32>(aligned_bytes, IxDyn(&[2])).unwrap();
+
+        assert!(borrowed.is_view());
+        assert_eq!(borrowed.as_ptr(), aligned_values.as_ptr());
+
+        let backing = [0x0403_0201_u32, 0x0807_0605, 0x0c0b_0a09];
+        let backing_bytes = bytemuck::cast_slice(&backing);
+        let misaligned_bytes = &backing_bytes[1..9];
+        let copied = create_cowndarray_from_bytes::<u32>(misaligned_bytes, IxDyn(&[2])).unwrap();
+
+        assert!(!copied.is_view());
+        assert_ne!(copied.as_ptr().cast::<u8>(), misaligned_bytes.as_ptr());
+        assert_eq!(copied.as_slice().unwrap(), &[0x0504_0302, 0x0908_0706]);
     }
 
     #[test]
